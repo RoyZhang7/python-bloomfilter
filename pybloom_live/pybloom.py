@@ -8,6 +8,7 @@ from __future__ import absolute_import
 import math
 import hashlib
 import copy
+import mmh3
 from pybloom_live.utils import range_fn, is_string_io, running_python_3
 from struct import unpack, pack, calcsize
 
@@ -17,7 +18,7 @@ except ImportError:
     raise ImportError('pybloom_live requires bitarray >= 0.3.4')
 
 
-def make_hashfuncs(num_slices, num_bits):
+def make_hashfuncs(num_slices, num_bits, is_murmur):
     if num_bits >= (1 << 31):
         fmt_code, chunk_size = 'Q', 8
     elif num_bits >= (1 << 15):
@@ -25,7 +26,9 @@ def make_hashfuncs(num_slices, num_bits):
     else:
         fmt_code, chunk_size = 'H', 2
     total_hash_bits = 8 * num_slices * chunk_size
-    if total_hash_bits > 384:
+    if is_murmur:
+        hashfn = mmh3.hash
+    elif total_hash_bits > 384:
         hashfn = hashlib.sha512
     elif total_hash_bits > 256:
         hashfn = hashlib.sha384
@@ -69,7 +72,7 @@ def make_hashfuncs(num_slices, num_bits):
 class BloomFilter(object):
     FILE_FMT = b'<dQQQQ'
 
-    def __init__(self, capacity, error_rate=0.001):
+    def __init__(self, capacity, error_rate=0.001,  is_murmur = False):
         """Implements a space-efficient probabilistic data structure
 
         capacity
@@ -95,18 +98,19 @@ class BloomFilter(object):
         bits_per_slice = int(math.ceil(
             (capacity * abs(math.log(error_rate))) /
             (num_slices * (math.log(2) ** 2))))
-        self._setup(error_rate, num_slices, bits_per_slice, capacity, 0)
+        self._setup(error_rate, num_slices, bits_per_slice, capacity, 0, is_murmur)
         self.bitarray = bitarray.bitarray(self.num_bits, endian='little')
         self.bitarray.setall(False)
 
-    def _setup(self, error_rate, num_slices, bits_per_slice, capacity, count):
+    def _setup(self, error_rate, num_slices, bits_per_slice, capacity, count, is_murmur):
         self.error_rate = error_rate
         self.num_slices = num_slices
         self.bits_per_slice = bits_per_slice
         self.capacity = capacity
         self.num_bits = num_slices * bits_per_slice
         self.count = count
-        self.make_hashes, self.hashfn = make_hashfuncs(self.num_slices, self.bits_per_slice)
+        self.is_murmur = is_murmur
+        self.make_hashes, self.hashfn = make_hashfuncs(self.num_slices, self.bits_per_slice, self.is_murmur)
 
     def __contains__(self, key):
         """Tests a key's membership in this bloom filter.
