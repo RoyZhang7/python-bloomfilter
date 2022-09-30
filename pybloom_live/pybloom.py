@@ -8,6 +8,7 @@ from __future__ import absolute_import
 import math
 import hashlib
 import copy
+import pyhahsh
 from pybloom_live.utils import range_fn, is_string_io, running_python_3
 from struct import unpack, pack, calcsize
 
@@ -66,10 +67,45 @@ def make_hashfuncs(num_slices, num_bits):
     return _hash_maker, hashfn
 
 
+def make_hashfuncs_noncrypto (num_slices, num_bits, hash_func):
+    if num_bits >= (1 << 31):
+        fmt_code, chunk_size = 'Q', 8
+    elif num_bits >= (1 << 15):
+        fmt_code, chunk_size = 'I', 4
+    else:
+        fmt_code, chunk_size = 'H', 2
+    total_hash_bits = 8 * num_slices * chunk_size
+
+    if hash_func == 'murmur3':
+        if total_hash_bits > 128:
+            hashfn = pyhahsh.murmur3_x86_128
+        else:
+            hashfn = pyhahsh.murmur3_32
+    elif hash_func == 'FNV1':
+        if total_hash_bits > 64:
+            hashfn = pyhahsh.fnv1_64
+        else:
+            hashfn = pyhahsh.fnv1_32
+    elif hash_func == 'FNV1a':
+        if total_hash_bits > 64:
+            hashfn = pyhahsh.fnv1a_64
+        else:
+            hashfn = pyhahsh.fnv1a_32
+    else:
+        raise ValueError("Input hash function is not supported yet")
+
+    output_size = hashfn('teststring').bit_length()
+    fmt = fmt_code * (output_size // chunk_size)
+    num_salts, extra = divmod(num_slices, len(fmt))
+    if extra:
+        num_salts += 1
+    salts = tuple(hashfn(hashfn(pack('I', i))) for i in range_fn(0, num_salts))
+
+
 class BloomFilter(object):
     FILE_FMT = b'<dQQQQ'
 
-    def __init__(self, capacity, error_rate=0.001):
+    def __init__(self, capacity, error_rate=0.001, noncrypto_hashfunc = ''):
         """Implements a space-efficient probabilistic data structure
 
         capacity
@@ -80,6 +116,10 @@ class BloomFilter(object):
             the error_rate of the filter returning false positives. This
             determines the filters capacity. Inserting more than capacity
             elements greatly increases the chance of false positives.
+        noncrypto_hashfuncs
+            The noncryptographic hash functions that user desires. It's empty
+            by default, indicating user doesn't use non-cryptographic hash
+            function. Only support murmur3, fnv1, and fnv1a for now.
         """
         if not (0 < error_rate < 1):
             raise ValueError("Error_Rate must be between 0 and 1.")
@@ -95,18 +135,21 @@ class BloomFilter(object):
         bits_per_slice = int(math.ceil(
             (capacity * abs(math.log(error_rate))) /
             (num_slices * (math.log(2) ** 2))))
-        self._setup(error_rate, num_slices, bits_per_slice, capacity, 0)
+        self._setup(error_rate, num_slices, bits_per_slice, capacity, 0, noncrypto_hashfunc)
         self.bitarray = bitarray.bitarray(self.num_bits, endian='little')
         self.bitarray.setall(False)
 
-    def _setup(self, error_rate, num_slices, bits_per_slice, capacity, count):
+    def _setup(self, error_rate, num_slices, bits_per_slice, capacity, count, hashfunc):
         self.error_rate = error_rate
         self.num_slices = num_slices
         self.bits_per_slice = bits_per_slice
         self.capacity = capacity
         self.num_bits = num_slices * bits_per_slice
         self.count = count
-        self.make_hashes, self.hashfn = make_hashfuncs(self.num_slices, self.bits_per_slice)
+        if not hashfunc:
+            self.make_hashes, self.hashfn = make_hashfuncs(self.num_slices, self.bits_per_slice)
+        else:
+            self.make_hashes, self.hashfn = make_hashfuncs_noncrypto(self.num_slices, self.bits_per_slice, hashfunc)
 
     def __contains__(self, key):
         """Tests a key's membership in this bloom filter.
